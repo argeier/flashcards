@@ -1,0 +1,37 @@
+[project]
+name = "flashcards-pdf"
+version = "0.1.0"
+description = "Make printable 2x2 flashcards PDFs from CSV/Excel"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "pandas>=2.0",
+  "reportlab>=4.0",
+  "openpyxl>=3.1",
+]
+
+[project.scripts]
+flashcards = "flashcards:main"
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.5",
+  "mypy>=1.10",
+  "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+# ✅ tell hatchling to include a single-file module
+[tool.hatch.build.targets.wheel]
+include = ["flashcards.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.mypy]
+python_version = "3.9"
+strict = false
