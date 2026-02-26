@@ -2,8 +2,7 @@
 
 A command-line tool that converts Markdown notes (optimized for Obsidian) into printable 2x2 PDF flashcards and importable Anki decks. 
 
-<img src="examples/example_front.png" width="500" alt="Example flashcards">
-<img src="examples/example_back.png" width="500" alt="Example flashcards">
+<img src="examples/example.png" width="800">
 
 ## Features
 - **Native Markdown Parsing**: Supports tables, lists, bold/italics, and ` ``` ` code blocks.
