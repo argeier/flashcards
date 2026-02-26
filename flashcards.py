@@ -87,8 +87,11 @@ def _resolve_image_path(
 def create_pdf(questions, answers, output_pdf, images_dir=None):
     c = canvas.Canvas(str(output_pdf), pagesize=landscape(A4))
     page_width, page_height = landscape(A4)
-    margin = 0.25 * inch
-    card_width, card_height = (page_width - 0.5 * inch) / 2, (page_height - 0.5 * inch) / 2
+
+    # Perfectly symmetrical outer margins
+    outer_margin = 0.25 * inch
+    card_width = (page_width - (2 * outer_margin)) / 2
+    card_height = (page_height - (2 * outer_margin)) / 2
 
     # --- Platypus PDF Styles (ULTRA-TIGHT SPACING) ---
     styles = getSampleStyleSheet()
@@ -149,7 +152,7 @@ def create_pdf(questions, answers, output_pdf, images_dir=None):
         table_data = []
 
         base_style = q_style if is_question else ans_style
-        max_w = card_width - (margin * 2.5)
+        max_w = card_width - (outer_margin * 2.5)
 
         card_num = None
         if is_question and lines:
@@ -281,38 +284,31 @@ def create_pdf(questions, answers, output_pdf, images_dir=None):
                 continue
             row, col = i // 2, i % 2
 
-            x = col * card_width + margin / 2
-            y = page_height - ((row + 1) * card_height) - margin / 2
+            # Use the calculated perfectly symmetrical margins
+            x = outer_margin + (col * card_width)
+            y = page_height - outer_margin - ((row + 1) * card_height)
             c.rect(x, y, card_width, card_height)
 
             flowables, card_num = parse_to_flowables(item, is_question_side)
 
-            pad = margin * 1.5
+            pad = 0.25 * inch
             id_space = 15 if is_question_side else 0
 
-            # The maximum available space inside the card border
             frame_w = card_width - (pad * 2)
             frame_h = card_height - (pad * 2) - id_space
 
-            # Wrap the flowables to calculate their EXACT height
-            kif = KeepInFrame(frame_w, frame_h, flowables, mode="shrink")
+            # Set vAlign to MIDDLE for both sides
+            kif = KeepInFrame(
+                frame_w, frame_h, flowables, mode="shrink", hAlign="CENTER", vAlign="MIDDLE"
+            )
             actual_w, actual_h = kif.wrapOn(c, frame_w, frame_h)
 
-            # 1. Perfectly center horizontally
             draw_x = x + pad + (frame_w - actual_w) / 2
+            # Center vertically for both questions and answers
+            draw_y = y + pad + id_space + (frame_h - actual_h) / 2
 
-            # 2. Perfectly center vertically
-            if is_question_side:
-                # Calculate the exact middle coordinate for the front of the card
-                draw_y = y + pad + id_space + (frame_h - actual_h) / 2
-            else:
-                # Stick it to the top margin for the back of the card
-                draw_y = y + card_height - pad - actual_h
-
-            # Draw it exactly where we calculated
             kif.drawOn(c, draw_x, draw_y)
 
-            # Draw the little gray ID number at the bottom for questions
             if is_question_side and card_num:
                 c.setFont("Helvetica", 9)
                 c.setFillColor(colors.grey)
@@ -413,11 +409,11 @@ def main():
 
         apkg_path = input_file.with_name(f"{output_stem}.apkg")
         create_anki_deck(deck_data, output_stem, apkg_path, media)
-        print(f"Erfolg! Anki-Deck erstellt: {apkg_path.name}")
+        print(f"Success! Anki-Deck generated: {apkg_path.name}")
 
     pdf_path = input_file.with_name(f"{output_stem}.pdf")
     create_pdf(pdf_qs, pdf_ans, pdf_path, img_dir)
-    print(f"Erfolg! PDF erstellt: {pdf_path.name}")
+    print(f"Success! PDF generated: {pdf_path.name}")
 
 
 if __name__ == "__main__":
