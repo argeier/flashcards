@@ -1,64 +1,76 @@
 #!/usr/bin/env python3
 import argparse
-import html
 import pathlib
 import re
 from typing import List, Optional
+from xml.sax.saxutils import escape
 
 import genanki
+import markdown
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
+from reportlab.platypus import Image as RLImage
+from reportlab.platypus import KeepInFrame, Paragraph, Preformatted, Table, TableStyle
 
-IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff")
+# --- Constants & Configuration ---
 ANKI_MODEL_ID = 1607392319
-ANKI_DECK_ID = 2059400110
 
 
-def create_anki_deck(questions, answers, deck_name, output_path, media_files):
+def create_anki_deck(deck_data, root_deck_name, output_path, media_files):
+    model_css = (
+        ".card { text-align: center; color: black; background-color: white; font-family: Arial; font-size: 18px; } "
+        ".question { margin-bottom: 20px; font-weight: bold; } "
+        ".answer { text-align: left; display: inline-block; width: 100%; } "
+        "img { max-width: 100%; height: auto; } "
+        "table { border-collapse: collapse; margin: 10px auto; width: 100%; } "
+        "th, td { border: 1px solid #ccc; padding: 6px; text-align: left; } "
+        "th { background-color: #f4f4f4; } "
+        "pre { text-align: left; background: #f0f0f0; padding: 10px; border-radius: 5px; overflow-x: auto; } "
+        "code { font-family: monospace; background: #f0f0f0; padding: 2px; } "
+        "ul, ol { text-align: left; display: inline-block; margin-left: 20px; } "
+        "b, strong { color: #2e5cb8; } "
+    )
+
     model = genanki.Model(
         ANKI_MODEL_ID,
-        "Obsidian Unique Model",
+        "Obsidian Markdown Hierarchical Model",
         fields=[{"name": "Question"}, {"name": "Answer"}],
         templates=[
             {
                 "name": "Card 1",
-                "qfmt": '<div style="font-family: Arial; font-size: 20px; text-align: center;">{{Question}}</div>',
-                "afmt": '{{FrontSide}}<hr id="answer"><div style="font-family: Arial; font-size: 16px; text-align: left; display: inline-block;">{{Answer}}</div>',
+                "qfmt": '<div class="question">{{Question}}</div>',
+                "afmt": '{{FrontSide}}<hr id="answer"><div class="answer">{{Answer}}</div>',
             }
         ],
-        css=".card { text-align: center; color: black; background-color: white; } img { max-width: 100%; height: auto; }",
+        css=model_css,
     )
 
-    deck = genanki.Deck(ANKI_DECK_ID, deck_name)
+    decks = []
+    global_idx = 1
 
-    for i, (q, a) in enumerate(zip(questions, answers)):
-        if not q.strip():
-            continue
+    for subdeck_name, qa_pairs in deck_data.items():
+        full_name = f"{root_deck_name}::{subdeck_name}" if subdeck_name else root_deck_name
+        deck_id = abs(hash(full_name)) % (10**10)
+        deck = genanki.Deck(deck_id, full_name)
 
-        q_safe = html.escape(q)
-        a_safe = html.escape(a)
+        for q_html, a_html in qa_pairs:
+            q_final = f"<div style='display:none;'>{global_idx:04d}</div>{q_html}<br><span style='font-size: 10px; color: grey;'>ID: {global_idx}</span>"
+            note = genanki.Note(model=model, fields=[q_final, a_html])
+            deck.add_note(note)
+            global_idx += 1
 
-        def replace_with_img(match):
-            img_name = match.group(1).split("|")[0]
-            return f'<img src="{img_name}">'
+        decks.append(deck)
 
-        q_html = re.sub(r"!\[\[(.*?)(?:\|.*?)?\]\]", replace_with_img, q_safe)
-        a_html = re.sub(r"!\[\[(.*?)(?:\|.*?)?\]\]", replace_with_img, a_safe)
-
-        # ADDED HIDDEN PREFIX {i+1:04d} for strict Anki sorting
-        q_final = f"<div style='display:none;'>{i + 1:04d}</div>{q_html.replace('\n', '<br>')}<br><br><span style='font-size: 10px; color: grey;'>ID: {i + 1}</span>"
-        a_final = a_html.replace("\n", "<br>").replace("    ", "&nbsp;&nbsp;&nbsp;&nbsp;")
-
-        note = genanki.Note(model=model, fields=[q_final, a_final])
-        deck.add_note(note)
-
-    package = genanki.Package(deck)
+    package = genanki.Package(decks)
     package.media_files = media_files
     package.write_to_file(output_path)
 
 
+# --- Helper Functions ---
 def _extract_image_names(text: str) -> List[str]:
     return [m.split("|")[0] for m in re.findall(r"!\[\[(.*?)(?:\|.*?)?\]\]", text)]
 
@@ -71,120 +83,241 @@ def _resolve_image_path(
     return None
 
 
-def wrap_line_with_indent(c, text, max_width, bullet_width):
-    lines = []
-    words = text.split()
-    if not words:
-        return [""]
-    curr_line = []
-    for i, word in enumerate(words):
-        test_line = " ".join(curr_line + [word])
-        eff_max = max_width if i == 0 else max_width - bullet_width
-        if c.stringWidth(test_line) < eff_max:
-            curr_line.append(word)
-        else:
-            lines.append(" ".join(curr_line))
-            curr_line = [word]
-    lines.append(" ".join(curr_line))
-    return lines
-
-
+# --- Advanced PDF Generator (Markdown -> ReportLab Platypus) ---
 def create_pdf(questions, answers, output_pdf, images_dir=None):
     c = canvas.Canvas(str(output_pdf), pagesize=landscape(A4))
     page_width, page_height = landscape(A4)
     margin = 0.25 * inch
     card_width, card_height = (page_width - 0.5 * inch) / 2, (page_height - 0.5 * inch) / 2
 
-    def draw_page(c, items, is_question_side=True):
-        c.setLineWidth(0.5)
-        c.setStrokeColor(colors.lightgrey)
-        for i, item in enumerate(items):
-            if not item and not is_question_side:
-                continue
-            row, col = i // 2, i % 2
-            x, y = (
-                col * card_width + margin / 2,
-                page_height - ((row + 1) * card_height) - margin / 2,
-            )
-            c.rect(x, y, card_width, card_height)
+    # --- Platypus PDF Styles (ULTRA-TIGHT SPACING) ---
+    styles = getSampleStyleSheet()
+    ans_style = ParagraphStyle(
+        "AnsText",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8.5,
+        leading=10,
+        spaceBefore=0,
+        spaceAfter=2,
+    )
+    q_style = ParagraphStyle(
+        "QText",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        leading=15,
+        alignment=TA_CENTER,
+        spaceBefore=0,
+        spaceAfter=0,
+    )
+    code_style = ParagraphStyle(
+        "CodeText",
+        parent=styles["Normal"],
+        fontName="Courier",
+        fontSize=7.5,
+        leading=9,
+        backColor=colors.whitesmoke,
+        borderPadding=2,
+        spaceAfter=2,
+    )
+    table_text_style = ParagraphStyle(
+        "TableText", parent=styles["Normal"], fontName="Helvetica", fontSize=7.5, leading=9
+    )
 
-            img_names = _extract_image_names(item)
+    table_style = TableStyle(
+        [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ]
+    )
+
+    def parse_to_flowables(text, is_question=False):
+        flowables = []
+        lines = text.split("\n")
+
+        in_code = False
+        code_lines = []
+        in_table = False
+        table_data = []
+
+        base_style = q_style if is_question else ans_style
+        max_w = card_width - (margin * 2.5)
+
+        card_num = None
+        if is_question and lines:
+            card_num = lines.pop().strip()
+
+        for line in lines:
+            line_stripped = line.strip()
+
+            # --- 1. Fenced Code Blocks ---
+            if line_stripped.startswith("```"):
+                if in_code:
+                    in_code = False
+                    code_text = escape("\n".join(code_lines))
+                    pre = Preformatted(code_text, code_style)
+                    flowables.append(pre)
+                    code_lines = []
+                else:
+                    in_code = True
+                continue
+            if in_code:
+                code_lines.append(line)
+                continue
+
+            # --- 2. Markdown Tables ---
+            if line_stripped.startswith("|") and line_stripped.endswith("|"):
+                in_table = True
+                row = [cell.strip() for cell in line_stripped.split("|")[1:-1]]
+                if all(re.match(r"^[-:]+$", c.replace(" ", "")) for c in row):
+                    continue
+
+                formatted_row = []
+                for c_raw in row:
+                    c_esc = escape(c_raw)
+                    c_esc = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", c_esc)
+                    c_esc = re.sub(r"\*(.*?)\*", r"<i>\1</i>", c_esc)
+                    c_esc = re.sub(r"`(.*?)`", r'<font name="Courier">\1</font>', c_esc)
+                    ts = ParagraphStyle(
+                        "Tbl",
+                        parent=table_text_style,
+                        alignment=TA_CENTER if not table_data else TA_LEFT,
+                    )
+                    formatted_row.append(Paragraph(c_esc, ts))
+                table_data.append(formatted_row)
+                continue
+            else:
+                if in_table:
+                    t = Table(table_data)
+                    t.setStyle(table_style)
+                    t.hAlign = "CENTER" if is_question else "LEFT"
+                    t.spaceAfter = 4
+                    flowables.append(t)
+                    in_table = False
+                    table_data = []
+
+            if not line_stripped:
+                continue
+
+            # --- 3. Image Handling ---
+            img_names = _extract_image_names(line)
             if img_names:
                 img_path = _resolve_image_path(img_names[0], images_dir)
                 if img_path:
                     try:
-                        c.drawImage(
-                            str(img_path),
-                            x + card_width * 0.075,
-                            y + card_height * 0.075,
-                            width=card_width * 0.85,
-                            height=card_height * 0.85,
-                            preserveAspectRatio=True,
-                            mask="auto",
-                        )
-                        if is_question_side:
-                            card_num = item.split("\n")[-1]
-                            c.setFont("Helvetica", 9)
-                            c.setFillColor(colors.grey)
-                            c.drawCentredString(x + card_width / 2, y + 10, f"ID: {card_num}")
-                            c.setFillColor(colors.black)
-                        continue
-                    except:
+                        img = RLImage(str(img_path))
+                        img.drawWidth = max_w * 0.8
+                        img.drawHeight = (img.drawWidth / img.imageWidth) * img.imageHeight
+                        if img.drawHeight > card_height * 0.5:
+                            img.drawHeight = card_height * 0.5
+                            img.drawWidth = (img.drawHeight / img.imageHeight) * img.imageWidth
+                        img.hAlign = "CENTER" if is_question else "LEFT"
+                        img.spaceAfter = 4
+                        flowables.append(img)
+                    except Exception:
                         pass
+                continue
 
-            max_w = card_width - (margin * 2.5)
+            # --- 4. Standard Text and Lists ---
+            if line_stripped.startswith("![") or line_stripped.startswith("]("):
+                continue
+
+            indent = len(line) - len(line.lstrip())
+            clean_txt = line.strip()
+            bullet = None
+
+            if clean_txt.startswith("- ") or clean_txt.startswith("* "):
+                bullet = "&bull;"
+                clean_txt = clean_txt[2:]
+            elif re.match(r"^\d+\.\s", clean_txt):
+                bullet = clean_txt.split(".")[0] + "."
+                clean_txt = clean_txt.split(".", 1)[1].lstrip()
+
+            clean_txt = escape(clean_txt)
+            clean_txt = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", clean_txt)
+            clean_txt = re.sub(r"\*(.*?)\*", r"<i>\1</i>", clean_txt)
+            clean_txt = re.sub(r"`(.*?)`", r'<font name="Courier">\1</font>', clean_txt)
+
+            if is_question:
+                p_style = ParagraphStyle("DynQ", parent=base_style, alignment=TA_CENTER)
+                flowables.append(Paragraph(clean_txt, p_style))
+            else:
+                indent_pts = indent * 4
+                p_style = ParagraphStyle(
+                    "DynA",
+                    parent=base_style,
+                    leftIndent=indent_pts + (12 if bullet else 0),
+                    firstLineIndent=-12 if bullet else 0,
+                    bulletIndent=indent_pts,
+                )
+                if bullet:
+                    flowables.append(Paragraph(f"<bullet>{bullet}</bullet>{clean_txt}", p_style))
+                else:
+                    flowables.append(Paragraph(clean_txt, p_style))
+
+        if in_table:
+            t = Table(table_data)
+            t.setStyle(table_style)
+            t.hAlign = "CENTER" if is_question else "LEFT"
+            t.spaceAfter = 4
+            flowables.append(t)
+
+        return flowables, card_num
+
+    def draw_page(c, items, is_question_side=True):
+        c.setLineWidth(0.5)
+        c.setStrokeColor(colors.lightgrey)
+
+        for i, item in enumerate(items):
+            if not item and not is_question_side:
+                continue
+            row, col = i // 2, i % 2
+
+            x = col * card_width + margin / 2
+            y = page_height - ((row + 1) * card_height) - margin / 2
+            c.rect(x, y, card_width, card_height)
+
+            flowables, card_num = parse_to_flowables(item, is_question_side)
+
+            pad = margin * 1.5
+            id_space = 15 if is_question_side else 0
+
+            # The maximum available space inside the card border
+            frame_w = card_width - (pad * 2)
+            frame_h = card_height - (pad * 2) - id_space
+
+            # Wrap the flowables to calculate their EXACT height
+            kif = KeepInFrame(frame_w, frame_h, flowables, mode="shrink")
+            actual_w, actual_h = kif.wrapOn(c, frame_w, frame_h)
+
+            # 1. Perfectly center horizontally
+            draw_x = x + pad + (frame_w - actual_w) / 2
+
+            # 2. Perfectly center vertically
             if is_question_side:
-                parts = item.split("\n")
-                title_text, card_num = "\n".join(parts[:-1]), parts[-1]
-                c.setFont("Helvetica-Bold", 14)
-                wrapped_title = []
-                for line in title_text.split("\n"):
-                    words = line.split()
-                    curr = []
-                    for w in words:
-                        if c.stringWidth(" ".join(curr + [w])) < max_w:
-                            curr.append(w)
-                        else:
-                            wrapped_title.append(" ".join(curr))
-                            curr = [w]
-                    wrapped_title.append(" ".join(curr))
-                line_h = 16
-                curr_y = y + (card_height / 2) + ((len(wrapped_title) * line_h) / 2) - line_h
-                c.setFillColor(colors.black)
-                for line in wrapped_title:
-                    c.drawCentredString(x + card_width / 2, curr_y, line)
-                    curr_y -= line_h
+                # Calculate the exact middle coordinate for the front of the card
+                draw_y = y + pad + id_space + (frame_h - actual_h) / 2
+            else:
+                # Stick it to the top margin for the back of the card
+                draw_y = y + card_height - pad - actual_h
+
+            # Draw it exactly where we calculated
+            kif.drawOn(c, draw_x, draw_y)
+
+            # Draw the little gray ID number at the bottom for questions
+            if is_question_side and card_num:
                 c.setFont("Helvetica", 9)
                 c.setFillColor(colors.grey)
                 c.drawCentredString(x + card_width / 2, y + 10, f"ID: {card_num}")
-            else:
-                c.setFont("Helvetica", 9)
-                lines = [l for l in item.split("\n") if l.strip()]
-                if not lines:
-                    continue
-                indents = sorted(list(set(len(l) - len(l.lstrip()) for l in lines)))
-                indent_map = {val: i for i, val in enumerate(indents)}
-                processed = []
-                for rl in lines:
-                    depth = indent_map.get(len(rl) - len(rl.lstrip()), 0)
-                    bullet = ["• ", "◦ ", "▪ ", "▫ "][min(depth, 3)]
-                    clean_txt = rl.strip().lstrip("-* ")
-                    wrapped = wrap_line_with_indent(c, clean_txt, max_w - (depth * 12), 8)
-                    for idx, wl in enumerate(wrapped):
-                        processed.append(
-                            (depth * 12 + (8 if idx > 0 else 0), (bullet if idx == 0 else "") + wl)
-                        )
-                line_h = 10
-                total_h = len(processed) * line_h
-                curr_y = y + (card_height / 2) + (total_h / 2) - line_h
-                max_list_w = 0
-                for ind, txt in processed:
-                    max_list_w = max(max_list_w, c.stringWidth(txt) + ind)
-                start_x_base = x + (card_width - max_list_w) / 2
                 c.setFillColor(colors.black)
-                for indent, text in processed:
-                    c.drawString(start_x_base + indent, curr_y, text)
-                    curr_y -= line_h
 
     for i in range(0, len(questions), 4):
         draw_page(c, questions[i : i + 4], True)
@@ -196,26 +329,95 @@ def create_pdf(questions, answers, output_pdf, images_dir=None):
                 ans_batch[2], ans_batch[3] = ans_batch[3], ans_batch[2]
         draw_page(c, ans_batch, False)
         c.showPage()
+
     c.save()
 
 
+# --- Markdown Preprocessor (For Anki HTML) ---
+def preprocess_markdown(text):
+    text = re.sub(r"!\[\[(.*?)(?:\|.*?)?\]\]", r"![](\1)", text)
+    text = re.sub(r"<([A-Z][^>]*)>", r"&lt;\1&gt;", text)
+
+    def dedent_code(match):
+        block = match.group(0)
+        m = re.match(r"^([ \t]+)```", block)
+        if not m:
+            return block
+        indent_str = m.group(1)
+
+        lines = block.split("\n")
+        dedented = []
+        for line in lines:
+            if line.startswith(indent_str):
+                dedented.append(line[len(indent_str) :])
+            else:
+                dedented.append(line)
+        return "\n".join(dedented)
+
+    text = re.sub(r"^[ \t]*```[\s\S]*?^[ \t]*```", dedent_code, text, flags=re.M)
+    text = re.sub(r"(?<!\n)\n([ \t]*[-*+]\s+)", r"\n\n\1", text)
+
+    return text
+
+
+# --- Main Logic ---
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("file")
-    parser.add_argument("--anki", action="store_true")
+    parser.add_argument("file", help="Path to your Markdown file")
+    parser.add_argument("--anki", action="store_true", help="Enable Anki .apkg generation")
+    parser.add_argument("-n", "--name", help="Custom output filename")
     args = parser.parse_args()
+
     input_file = pathlib.Path(args.file).resolve()
     img_dir = input_file.parent / "attachments"
+    output_stem = args.name if args.name else input_file.stem
+
     with open(input_file, "r", encoding="utf-8") as f:
-        matches = re.findall(r"^##\s*(.*?)\n(.*?)(?=\n##\s*|\Z)", f.read(), re.M | re.S)
-    qs, ans = [m[0].strip() for m in matches], [m[1].strip() for m in matches]
+        content = f.read().replace("\r\n", "\n")
+
+    md_exts = ["tables", "fenced_code", "sane_lists", "nl2br"]
+    sections = re.split(r"^#\s+", content, flags=re.M)
+    deck_data = {}
+    pdf_qs, pdf_ans = [], []
+
+    for section in sections:
+        if not section.strip():
+            continue
+        lines = section.split("\n", 1)
+        subdeck_name = lines[0].strip()
+        body = lines[1] if len(lines) > 1 else ""
+
+        matches = re.findall(r"^##\s*(.*?)\n(.*?)(?=\n##\s*|\Z)", body, re.M | re.S)
+        if matches:
+            rendered_pairs = []
+            for q_raw, a_raw in matches:
+                q_prep = preprocess_markdown(q_raw.strip())
+                a_prep = preprocess_markdown(a_raw.strip())
+
+                q_html = markdown.markdown(q_prep, extensions=md_exts)
+                a_html = markdown.markdown(a_prep, extensions=md_exts)
+
+                rendered_pairs.append((q_html, a_html))
+
+                pdf_qs.append(f"{q_raw.strip()}\n{len(pdf_qs) + 1}")
+                pdf_ans.append(a_raw.strip())
+
+            deck_data[subdeck_name] = rendered_pairs
+
     if args.anki:
-        all_text = " ".join(qs + ans)
-        media = [str(img_dir / n) for n in _extract_image_names(all_text) if (img_dir / n).exists()]
-        create_anki_deck(qs, ans, input_file.stem, input_file.with_suffix(".apkg"), media)
-    pdf_q = [f"{q}\n{i + 1}" for i, q in enumerate(qs)]
-    create_pdf(pdf_q, ans, input_file.with_suffix(".pdf"), img_dir)
-    print(f"Erfolg! PDF erstellt: {input_file.with_suffix('.pdf')}")
+        media = []
+        if img_dir.exists():
+            media = [
+                str(img_dir / n) for n in _extract_image_names(content) if (img_dir / n).exists()
+            ]
+
+        apkg_path = input_file.with_name(f"{output_stem}.apkg")
+        create_anki_deck(deck_data, output_stem, apkg_path, media)
+        print(f"Erfolg! Anki-Deck erstellt: {apkg_path.name}")
+
+    pdf_path = input_file.with_name(f"{output_stem}.pdf")
+    create_pdf(pdf_qs, pdf_ans, pdf_path, img_dir)
+    print(f"Erfolg! PDF erstellt: {pdf_path.name}")
 
 
 if __name__ == "__main__":
