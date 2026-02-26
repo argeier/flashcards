@@ -14,7 +14,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Image as RLImage
-from reportlab.platypus import KeepInFrame, Paragraph, Preformatted, Table, TableStyle
+from reportlab.platypus import KeepInFrame, Paragraph, Table, TableStyle, XPreformatted
 
 # --- Constants & Configuration ---
 ANKI_MODEL_ID = 1607392319
@@ -22,19 +22,20 @@ ANKI_MODEL_ID = 1607392319
 
 def create_anki_deck(deck_data, root_deck_name, output_path, media_files):
     model_css = (
-        ".card { text-align: center; color: black; background-color: white; font-family: Arial; font-size: 18px; } "
+        ".card { text-align: center; color: black; background-color: white; font-family: Arial; font-size: 16px; } "
         ".question { margin-bottom: 20px; font-weight: bold; } "
         ".answer { text-align: left; display: inline-block; width: 100%; } "
         "img { max-width: 100%; height: auto; } "
         "table { border-collapse: collapse; margin: 10px auto; width: 100%; } "
         "th, td { border: 1px solid #ccc; padding: 6px; text-align: left; } "
         "th { background-color: #f4f4f4; } "
-        "pre { text-align: left; background: #f0f0f0; padding: 10px; border-radius: 5px; overflow-x: auto; } "
-        "code { font-family: monospace; background: #f0f0f0; padding: 2px; } "
-        "ul, ol { text-align: left; display: inline-block; margin-left: 20px; } "
+        "pre { text-align: left; background: #f0f0f0; padding: 10px; border-radius: 5px; "
+        "      overflow-x: auto; max-width: 100%; box-sizing: border-box; } "
+        "code { font-family: monospace; background: #f0f0f0; padding: 2px; font-size: 13px; } "
+        "ul, ol { text-align: left; display: inline-block; margin-left: 20px; margin-top: 5px; margin-bottom: 5px; } "
+        "li { margin-bottom: 4px; } "
         "b, strong { color: #2e5cb8; } "
     )
-
     model = genanki.Model(
         ANKI_MODEL_ID,
         "Obsidian Markdown Hierarchical Model",
@@ -88,12 +89,11 @@ def create_pdf(questions, answers, output_pdf, images_dir=None):
     c = canvas.Canvas(str(output_pdf), pagesize=landscape(A4))
     page_width, page_height = landscape(A4)
 
-    # Perfectly symmetrical outer margins
     outer_margin = 0.25 * inch
     card_width = (page_width - (2 * outer_margin)) / 2
     card_height = (page_height - (2 * outer_margin)) / 2
 
-    # --- Platypus PDF Styles (ULTRA-TIGHT SPACING) ---
+    # --- Platypus PDF Styles ---
     styles = getSampleStyleSheet()
     ans_style = ParagraphStyle(
         "AnsText",
@@ -165,8 +165,26 @@ def create_pdf(questions, answers, output_pdf, images_dir=None):
             if line_stripped.startswith("```"):
                 if in_code:
                     in_code = False
+
+                    longest_line = max(code_lines, key=len) if code_lines else ""
+                    # Calculate pixel width of the longest line (accounting for tabs and padding)
+                    req_width = c.stringWidth(
+                        longest_line.replace("\t", "    "), code_style.fontName, code_style.fontSize
+                    ) + (code_style.borderPadding * 2)
+
+                    custom_code_style = code_style
+                    if req_width > max_w:
+                        # Calculate exact scale needed, adding a 2% safety buffer so it doesn't touch the very edge
+                        scale = (max_w * 0.98) / req_width
+                        custom_code_style = ParagraphStyle(
+                            "ScaledCode",
+                            parent=code_style,
+                            fontSize=code_style.fontSize * scale,
+                            leading=code_style.leading * scale,
+                        )
+
                     code_text = escape("\n".join(code_lines))
-                    pre = Preformatted(code_text, code_style)
+                    pre = XPreformatted(code_text, custom_code_style)
                     flowables.append(pre)
                     code_lines = []
                 else:
@@ -284,7 +302,6 @@ def create_pdf(questions, answers, output_pdf, images_dir=None):
                 continue
             row, col = i // 2, i % 2
 
-            # Use the calculated perfectly symmetrical margins
             x = outer_margin + (col * card_width)
             y = page_height - outer_margin - ((row + 1) * card_height)
             c.rect(x, y, card_width, card_height)
@@ -297,14 +314,12 @@ def create_pdf(questions, answers, output_pdf, images_dir=None):
             frame_w = card_width - (pad * 2)
             frame_h = card_height - (pad * 2) - id_space
 
-            # Set vAlign to MIDDLE for both sides
             kif = KeepInFrame(
                 frame_w, frame_h, flowables, mode="shrink", hAlign="CENTER", vAlign="MIDDLE"
             )
             actual_w, actual_h = kif.wrapOn(c, frame_w, frame_h)
 
             draw_x = x + pad + (frame_w - actual_w) / 2
-            # Center vertically for both questions and answers
             draw_y = y + pad + id_space + (frame_h - actual_h) / 2
 
             kif.drawOn(c, draw_x, draw_y)
@@ -334,6 +349,63 @@ def preprocess_markdown(text):
     text = re.sub(r"!\[\[(.*?)(?:\|.*?)?\]\]", r"![](\1)", text)
     text = re.sub(r"<([A-Z][^>]*)>", r"&lt;\1&gt;", text)
 
+    lines = text.split("\n")
+    cleaned_lines = []
+    in_table = False
+    header_sep_seen = False
+    in_code = False
+
+    for i, line in enumerate(lines):
+        line_stripped = line.strip()
+
+        # Protect code blocks
+        if line_stripped.startswith("```"):
+            in_code = not in_code
+            cleaned_lines.append(line)
+            continue
+
+        if in_code:
+            cleaned_lines.append(line)
+            continue
+
+        # Clean Table Separators
+        if line_stripped.startswith("|") and line_stripped.endswith("|"):
+            is_sep = re.match(r"^\|[\s\-:]+\|([\s\-:]+\|)*$", line_stripped)
+            if not in_table:
+                in_table = True
+                header_sep_seen = False
+
+            if is_sep:
+                if not header_sep_seen:
+                    header_sep_seen = True
+                    cleaned_lines.append(line)
+                else:
+                    continue  # DROP mid-table separators!
+            else:
+                cleaned_lines.append(line)
+        else:
+            in_table = False
+
+            # Ensure lists have a preceding blank line
+            is_list_item = re.match(r"^[ \t]*([-*+]|\d+\.)\s+", line)
+            if is_list_item and i > 0:
+                prev_line_orig = lines[i - 1]
+                prev_line_stripped = prev_line_orig.strip()
+                is_prev_list_item = re.match(r"^[ \t]*([-*+]|\d+\.)\s+", prev_line_orig)
+
+                if (
+                    prev_line_stripped
+                    and not is_prev_list_item
+                    and not prev_line_stripped.startswith("|")
+                    and not prev_line_stripped.startswith("#")
+                ):
+                    cleaned_lines.append("")
+
+            cleaned_lines.append(line)
+
+    text = "\n".join(cleaned_lines)
+
+    # Dedent ASCII architecture blocks
     def dedent_code(match):
         block = match.group(0)
         m = re.match(r"^([ \t]+)```", block)
@@ -351,8 +423,6 @@ def preprocess_markdown(text):
         return "\n".join(dedented)
 
     text = re.sub(r"^[ \t]*```[\s\S]*?^[ \t]*```", dedent_code, text, flags=re.M)
-    text = re.sub(r"(?<!\n)\n([ \t]*[-*+]\s+)", r"\n\n\1", text)
-
     return text
 
 
@@ -393,6 +463,14 @@ def main():
                 q_html = markdown.markdown(q_prep, extensions=md_exts)
                 a_html = markdown.markdown(a_prep, extensions=md_exts)
 
+                # Post-Process HTML: Scrub <br> tags injected by nl2br
+                block_tags = r"ul|ol|li|table|thead|tbody|tr|td|th|pre|div|h[1-6]|p"
+                for _ in range(2):
+                    q_html = re.sub(rf"(</?(?:{block_tags})[^>]*>)\s*<br\s*/?>", r"\1", q_html)
+                    a_html = re.sub(rf"(</?(?:{block_tags})[^>]*>)\s*<br\s*/?>", r"\1", a_html)
+                    q_html = re.sub(rf"<br\s*/?>\s*(</?(?:{block_tags})[^>]*>)", r"\1", q_html)
+                    a_html = re.sub(rf"<br\s*/?>\s*(</?(?:{block_tags})[^>]*>)", r"\1", a_html)
+
                 rendered_pairs.append((q_html, a_html))
 
                 pdf_qs.append(f"{q_raw.strip()}\n{len(pdf_qs) + 1}")
@@ -409,11 +487,11 @@ def main():
 
         apkg_path = input_file.with_name(f"{output_stem}.apkg")
         create_anki_deck(deck_data, output_stem, apkg_path, media)
-        print(f"Success! Anki-Deck generated: {apkg_path.name}")
+        print(f"Erfolg! Anki-Deck erstellt: {apkg_path.name}")
 
     pdf_path = input_file.with_name(f"{output_stem}.pdf")
     create_pdf(pdf_qs, pdf_ans, pdf_path, img_dir)
-    print(f"Success! PDF generated: {pdf_path.name}")
+    print(f"Erfolg! PDF erstellt: {pdf_path.name}")
 
 
 if __name__ == "__main__":
